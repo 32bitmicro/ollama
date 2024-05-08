@@ -315,7 +315,7 @@ func realpath(rel, from string) string {
 	return abspath
 }
 
-func CreateModel(ctx context.Context, name, modelFileDir, quantization string, modelfile *parser.File, fn func(resp api.ProgressResponse)) (err error) {
+func CreateModel(ctx context.Context, name model.Name, modelFileDir, quantization string, modelfile *parser.File, fn func(resp api.ProgressResponse)) (err error) {
 	config := ConfigV2{
 		OS:           "linux",
 		Architecture: "amd64",
@@ -440,17 +440,25 @@ func CreateModel(ctx context.Context, name, modelFileDir, quantization string, m
 				layers = append(layers, baseLayer.Layer)
 			}
 		case "license", "template", "system":
+			if c.Name != "license" {
+				// replace
+				layers = slices.DeleteFunc(layers, func(layer *Layer) bool {
+					if layer.MediaType != mediatype {
+						return false
+					}
+
+					if err := layer.Remove(); err != nil {
+						return false
+					}
+
+					return true
+				})
+			}
+
 			blob := strings.NewReader(c.Args)
 			layer, err := NewLayer(blob, mediatype)
 			if err != nil {
 				return err
-			}
-
-			if c.Name != "license" {
-				// replace
-				layers = slices.DeleteFunc(layers, func(layer *Layer) bool {
-					return layer.MediaType == mediatype
-				})
 			}
 
 			layers = append(layers, layer)
@@ -571,26 +579,15 @@ func CreateModel(ctx context.Context, name, modelFileDir, quantization string, m
 		}
 	}
 
-	unref := make(map[string]struct{})
-	if manifest, _, err := GetManifest(ParseModelPath(name)); err == nil {
-		for _, layer := range manifest.Layers {
-			if !slices.Contains(digests, layer.Digest) {
-				unref[layer.Digest] = struct{}{}
-			}
-		}
-
-		if manifest.Config.Digest != layer.Digest {
-			unref[manifest.Config.Digest] = struct{}{}
-		}
-	}
+	old, _ := ParseNamedManifest(name)
 
 	fn(api.ProgressResponse{Status: "writing manifest"})
 	if err := WriteManifest(name, layer, layers); err != nil {
 		return err
 	}
 
-	if !envconfig.NoPrune {
-		if err := deleteUnusedLayers(nil, unref); err != nil {
+	if !envconfig.NoPrune && old != nil {
+		if err := old.RemoveLayers(); err != nil {
 			return err
 		}
 	}
@@ -662,7 +659,7 @@ func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]struct{})
 		// save (i.e. delete from the deleteMap) any files used in other manifests
 		manifest, _, err := GetManifest(fmp)
 		if err != nil {
-			// nolint: nilerr
+			//nolint:nilerr
 			return nil
 		}
 
